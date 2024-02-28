@@ -41,6 +41,9 @@ from fastchat.modules.exllama import ExllamaConfig
 from fastchat.modules.xfastertransformer import XftConfig
 from fastchat.utils import is_partial_stop, is_sentence_complete, get_context_length
 
+import wandb
+import datetime
+
 
 def prepare_logits_processor(
     temperature: float, repetition_penalty: float, top_p: float, top_k: int
@@ -357,6 +360,16 @@ def chat_loop(
     debug: bool = True,
     history: bool = True,
 ):
+    completed_step = 0
+    now = datetime.datetime.now()
+    now = now.strftime("%Y-%m-%d-%H-%M-%S")
+    wandb_setting: dict = {
+        "entity": "taishi-nakamura",
+        "project": "inferece-bench",
+        "name": f"{model_path}_{num_gpus}gpus_{max_new_tokens}max_new_tokens",
+    }
+    wandb.init(**wandb_setting)
+
     # Model
     model, tokenizer = load_model(
         model_path,
@@ -407,149 +420,160 @@ def chat_loop(
 
     conv = None
 
-    while True:
-        if not history or not conv:
-            conv = new_chat()
+    with open('/home/taishi/workplace/A10_benchmark/questions.txt', 'r') as file:
+        for line in file:
+            if not history or not conv:
+                conv = new_chat()
 
-        try:
-            inp = chatio.prompt_for_input(conv.roles[0])
-        except EOFError:
-            inp = ""
+            if not history or not conv:
+                conv = new_chat()
+            
+            inp = line.strip() 
+            inp_num_tokens = len(tokenizer.encode(inp))
+            log_config = {}
+            log_config["inputs_num_tokens"] = inp_num_tokens
+            log_config["inputs_length"] = len(inp)
 
-        if inp == "!!exit" or not inp:
-            print("exit...")
-            break
-        elif inp == "!!reset":
-            print("resetting...")
-            conv = new_chat()
-            continue
-        elif inp == "!!remove":
-            print("removing last message...")
-            if len(conv.messages) > conv.offset:
-                # Assistant
-                if conv.messages[-1][0] == conv.roles[1]:
-                    conv.messages.pop()
-                # User
-                if conv.messages[-1][0] == conv.roles[0]:
-                    conv.messages.pop()
-                reload_conv(conv)
-            else:
-                print("No messages to remove.")
-            continue
-        elif inp == "!!regen":
-            print("regenerating last message...")
-            if len(conv.messages) > conv.offset:
-                # Assistant
-                if conv.messages[-1][0] == conv.roles[1]:
-                    conv.messages.pop()
-                # User
-                if conv.messages[-1][0] == conv.roles[0]:
+            if inp == "!!exit" or not inp:
+                print("exit...")
+                break
+            elif inp == "!!reset":
+                print("resetting...")
+                conv = new_chat()
+                continue
+            elif inp == "!!remove":
+                print("removing last message...")
+                if len(conv.messages) > conv.offset:
+                    # Assistant
+                    if conv.messages[-1][0] == conv.roles[1]:
+                        conv.messages.pop()
+                    # User
+                    if conv.messages[-1][0] == conv.roles[0]:
+                        conv.messages.pop()
                     reload_conv(conv)
-                    # Set inp to previous message
-                    inp = conv.messages.pop()[1]
                 else:
-                    # Shouldn't happen in normal circumstances
-                    print("No user message to regenerate from.")
+                    print("No messages to remove.")
+                continue
+            elif inp == "!!regen":
+                print("regenerating last message...")
+                if len(conv.messages) > conv.offset:
+                    # Assistant
+                    if conv.messages[-1][0] == conv.roles[1]:
+                        conv.messages.pop()
+                    # User
+                    if conv.messages[-1][0] == conv.roles[0]:
+                        reload_conv(conv)
+                        # Set inp to previous message
+                        inp = conv.messages.pop()[1]
+                    else:
+                        # Shouldn't happen in normal circumstances
+                        print("No user message to regenerate from.")
+                        continue
+                else:
+                    print("No messages to regenerate.")
                     continue
-            else:
-                print("No messages to regenerate.")
-                continue
-        elif inp.startswith("!!save"):
-            args = inp.split(" ", 1)
+            elif inp.startswith("!!save"):
+                args = inp.split(" ", 1)
 
-            if len(args) != 2:
-                print("usage: !!save <filename>")
-                continue
-            else:
-                filename = args[1]
+                if len(args) != 2:
+                    print("usage: !!save <filename>")
+                    continue
+                else:
+                    filename = args[1]
 
-            # Add .json if extension not present
-            if not "." in filename:
-                filename += ".json"
-
-            print("saving...", filename)
-            with open(filename, "w") as outfile:
-                json.dump(conv.dict(), outfile)
-            continue
-        elif inp.startswith("!!load"):
-            args = inp.split(" ", 1)
-
-            if len(args) != 2:
-                print("usage: !!load <filename>")
-                continue
-            else:
-                filename = args[1]
-
-            # Check if file exists and add .json if needed
-            if not os.path.exists(filename):
-                if (not filename.endswith(".json")) and os.path.exists(
-                    filename + ".json"
-                ):
+                # Add .json if extension not present
+                if not "." in filename:
                     filename += ".json"
-                else:
-                    print("file not found:", filename)
+
+                print("saving...", filename)
+                with open(filename, "w") as outfile:
+                    json.dump(conv.dict(), outfile)
+                continue
+            elif inp.startswith("!!load"):
+                args = inp.split(" ", 1)
+
+                if len(args) != 2:
+                    print("usage: !!load <filename>")
                     continue
+                else:
+                    filename = args[1]
 
-            print("loading...", filename)
-            with open(filename, "r") as infile:
-                new_conv = json.load(infile)
+                # Check if file exists and add .json if needed
+                if not os.path.exists(filename):
+                    if (not filename.endswith(".json")) and os.path.exists(
+                        filename + ".json"
+                    ):
+                        filename += ".json"
+                    else:
+                        print("file not found:", filename)
+                        continue
 
-            conv = get_conv_template(new_conv["template_name"])
-            conv.set_system_message(new_conv["system_message"])
-            conv.messages = new_conv["messages"]
-            reload_conv(conv)
-            continue
+                print("loading...", filename)
+                with open(filename, "r") as infile:
+                    new_conv = json.load(infile)
 
-        conv.append_message(conv.roles[0], inp)
-        conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt()
-
-        if is_codet5p:  # codet5p is a code completion model.
-            prompt = inp
-
-        gen_params = {
-            "model": model_path,
-            "prompt": prompt,
-            "temperature": temperature,
-            "repetition_penalty": repetition_penalty,
-            "max_new_tokens": max_new_tokens,
-            "stop": conv.stop_str,
-            "stop_token_ids": conv.stop_token_ids,
-            "echo": False,
-        }
-
-        try:
-            chatio.prompt_for_output(conv.roles[1])
-            output_stream = generate_stream_func(
-                model,
-                tokenizer,
-                gen_params,
-                device,
-                context_len=context_len,
-                judge_sent_end=judge_sent_end,
-            )
-            t = time.time()
-            outputs = chatio.stream_output(output_stream)
-            duration = time.time() - t
-            conv.update_last_message(outputs.strip())
-
-            if debug:
-                num_tokens = len(tokenizer.encode(outputs))
-                msg = {
-                    "conv_template": conv.name,
-                    "prompt": prompt,
-                    "outputs": outputs,
-                    "speed (token/s)": round(num_tokens / duration, 2),
-                }
-                print(f"\n{msg}\n")
-
-        except KeyboardInterrupt:
-            print("stopped generation.")
-            # If generation didn't finish
-            if conv.messages[-1][1] is None:
-                conv.messages.pop()
-                # Remove last user message, so there isn't a double up
-                if conv.messages[-1][0] == conv.roles[0]:
-                    conv.messages.pop()
-
+                conv = get_conv_template(new_conv["template_name"])
+                conv.set_system_message(new_conv["system_message"])
+                conv.messages = new_conv["messages"]
                 reload_conv(conv)
+                continue
+
+            conv.append_message(conv.roles[0], inp)
+            conv.append_message(conv.roles[1], None)
+            prompt = conv.get_prompt()
+
+            if is_codet5p:  # codet5p is a code completion model.
+                prompt = inp
+
+            gen_params = {
+                "model": model_path,
+                "prompt": prompt,
+                "temperature": temperature,
+                "repetition_penalty": repetition_penalty,
+                "max_new_tokens": max_new_tokens,
+                "stop": conv.stop_str,
+                "stop_token_ids": conv.stop_token_ids,
+                "echo": False,
+            }
+
+            try:
+                chatio.prompt_for_output(conv.roles[1])
+                output_stream = generate_stream_func(
+                    model,
+                    tokenizer,
+                    gen_params,
+                    device,
+                    context_len=context_len,
+                    judge_sent_end=judge_sent_end,
+                )
+                t = time.time()
+                outputs = chatio.stream_output(output_stream)
+                duration = time.time() - t
+                conv.update_last_message(outputs.strip())
+
+                if debug:
+                    num_tokens = len(tokenizer.encode(outputs))
+
+                    log_config["outputs_num_tokens"] = num_tokens
+                    log_config["outputs_length"] = len(outputs)
+                    log_config["token_per_sec"] = round(num_tokens / duration, 2)
+                    wandb.log(log_config, step=completed_step)
+                    completed_step += 1
+                    msg = {
+                        "conv_template": conv.name,
+                        "prompt": prompt,
+                        "outputs": outputs,
+                        "speed (token/s)": round(num_tokens / duration, 2),
+                    }
+                    print(f"\n{msg}\n")
+
+            except KeyboardInterrupt:
+                print("stopped generation.")
+                # If generation didn't finish
+                if conv.messages[-1][1] is None:
+                    conv.messages.pop()
+                    # Remove last user message, so there isn't a double up
+                    if conv.messages[-1][0] == conv.roles[0]:
+                        conv.messages.pop()
+
+                    reload_conv(conv)
